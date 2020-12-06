@@ -2,14 +2,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
+#include <vector>
 
 //#include <cassert>
 
 namespace x64emu {
 #include "cpu.h"
 
-namespace no_memory_change_eval {
+namespace eval {
+
+struct memory_change {
+  uint64_t pos, val;
+};
+
 const uint64_t stack_size = 8192;
 uint8_t stack[stack_size];
 int memory_read(x64cpu *cpu, void *user_data, uint64_t address, uint8_t *data,
@@ -18,29 +23,36 @@ int memory_read(x64cpu *cpu, void *user_data, uint64_t address, uint8_t *data,
     memset(data, 0, size);
     return 0;
   }
-  std::map<uint64_t, uint8_t> &map = *(std::map<uint64_t, uint8_t> *)user_data;
   for (uint8_t i = 0; i < size; i++) {
-    if (map.count(address + i)) {
-      data[i] = map[address + i];
-    } else {
-      data[i] = reinterpret_cast<uint8_t *>(address)[i];
-    }
+    data[i] = reinterpret_cast<uint8_t *>(address)[i];
   }
   return 0;
 }
 
 int memory_write(x64cpu *cpu, void *user_data, uint64_t address, uint8_t *data,
                  uint8_t size, int access_flags, uint64_t *fault_addr) {
-  std::map<uint64_t, uint8_t> &map = *(std::map<uint64_t, uint8_t> *)user_data;
+  std::vector<memory_change> &changes =
+      *(std::vector<memory_change> *)user_data;
+  if (size <= 8) {
+    changes.push_back(
+        (memory_change){address, *reinterpret_cast<uint64_t *>(address)});
+    for (uint8_t i = 0; i < size; i++) {
+      reinterpret_cast<uint8_t *>(address)[i] = data[i];
+    }
+    return 0;
+  }
+  for (uint64_t pos = 0; pos < size; pos += 8)
+    changes.push_back((memory_change){
+        address + pos, *reinterpret_cast<uint64_t *>(address + pos)});
   for (uint8_t i = 0; i < size; i++) {
-    map[address + i] = data[i];
+    reinterpret_cast<uint8_t *>(address)[i] = data[i];
   }
   return 0;
 }
 
 const int N = 10000;
 
-x64cpu_operand dop[4], *ops;
+x64cpu_operand dop[4], ops[N];
 int op_cnt = 0;
 
 struct execution_state {
@@ -54,10 +66,10 @@ struct execution_state {
   __typeof(x64cpu::modrmbyte) modrmbyte;
   __typeof(x64cpu::sibbyte) sibbyte;
   x64cpu_operand *op;
-} * cached_states;
+} cached_states[N];
 int cache_cnt = 0;
 
-execution_state **execution_state_buf;
+execution_state *execution_state_buf[N * 2 + 1];
 uint64_t base_rip;
 
 void reset_cache(uint64_t new_rip) {
@@ -158,24 +170,20 @@ x64cpu _cpu;
 
 struct __init {
   __init() {
-    ops = new x64cpu_operand[N];
-    cached_states = new execution_state[N];
-    execution_state_buf = new execution_state *[N * 2];
     x64cpu *cpu = &_cpu;
     cpu->mem_read = memory_read;
     cpu->mem_write = memory_write;
-    cpu->user_data = new std::map<uint64_t, uint8_t>;
+    std::vector<memory_change> *changes = new std::vector<memory_change>;
+    cpu->user_data = changes;
+    changes->reserve(N);
   }
 } ___init;
 
 uint64_t eval_function(void *func) {
   x64cpu *cpu = &_cpu;
   x64cpu_reset(cpu);
-  std::map<uint64_t, uint8_t> &map =
-      *(std::map<uint64_t, uint8_t> *)cpu->user_data;
-  map.clear();
   cpu->regs.rip = reinterpret_cast<uint64_t>(func);
-  if (cpu->regs.rip != base_rip)
+  if (std::abs(int64_t(cpu->regs.rip - base_rip)) > N)
     reset_cache(cpu->regs.rip);
   cpu->regs.rsp = reinterpret_cast<uint64_t>(stack + stack_size - 8);
   // memset(stack, 0, sizeof stack);
@@ -192,5 +200,17 @@ uint64_t eval_function(void *func) {
   }
   return cpu->regs.rax;
 }
-} // namespace no_memory_change_eval
+
+void revert_memory() {
+  x64cpu *cpu = &_cpu;
+  x64cpu_reset(cpu);
+  std::vector<memory_change> &changes =
+      *(std::vector<memory_change> *)cpu->user_data;
+  while (changes.size()) {
+    memory_change tmp = changes.back();
+    *reinterpret_cast<uint64_t *>(tmp.pos) = tmp.val;
+    changes.pop_back();
+  }
+}
+} // namespace eval
 } // namespace x64emu

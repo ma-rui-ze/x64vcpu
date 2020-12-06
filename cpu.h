@@ -560,7 +560,10 @@ void x64cpu_operand_write(x64cpu *cpu, int index, uint8_t *in, uint8_t size) {
 
   switch (op->type) {
   case X64CPU_OPT_IMMEDIATE:
+    memcpy((uint8_t *)&op->immediate, in, size);
+    op->size = size;
     break;
+
   case X64CPU_OPT_REGISTER:
     /* All 32-bit registers are zero-extended to 64 ??? */
     if (op->size == 4) {
@@ -601,7 +604,10 @@ void x64cpu_operand_write_u64(x64cpu *cpu, int index, uint64_t in,
 
   switch (op->type) {
   case X64CPU_OPT_IMMEDIATE:
+    op->immediate = in;
+    op->size = size;
     break;
+
   case X64CPU_OPT_REGISTER:
     /* All 32-bit registers are zero-extended to 64 ??? */
     if (size == 8)
